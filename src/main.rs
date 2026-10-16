@@ -49,20 +49,22 @@ struct NewArgs {
     #[arg(value_name = "DATETIME")]
     datetime: Option<String>,
 
-    /// Use a named pointer as the base timestamp.
-    #[arg(long, value_name = "POINTER")]
-    pointer: Option<String>,
-
-    /// Offset from the pointer.
+    /// Use a named pointer plus an offset as the timestamp.
     ///
-    /// Examples:
+    /// Offset examples:
     ///   +2d
     ///   -4h
     ///   +30min
     ///   +2m
     ///   +1y
-    #[arg(value_name = "OFFSET")]
-    offset: Option<String>,
+    #[arg(
+        long,
+        num_args = 2,
+        value_names = ["POINTER", "OFFSET"],
+        allow_hyphen_values = true,
+        conflicts_with = "datetime"
+    )]
+    pointer: Option<Vec<String>>,
 
     /// Commit message.
     #[arg(short = 'm', long)]
@@ -79,15 +81,15 @@ struct AmendArgs {
     #[arg(value_name = "DATETIME", conflicts_with = "pointer")]
     datetime: Option<String>,
 
-    /// Use a named pointer as the base timestamp.
-    #[arg(long, value_name = "POINTER", conflicts_with = "datetime")]
-    pointer: Option<String>,
-
-    /// Offset from the pointer.
-    ///
-    /// Must be supplied together with --pointer.
-    #[arg(value_name = "OFFSET")]
-    offset: Option<String>,
+    /// Use a named pointer plus an offset as the timestamp.
+    #[arg(
+        long,
+        num_args = 2,
+        value_names = ["POINTER", "OFFSET"],
+        allow_hyphen_values = true,
+        conflicts_with = "datetime"
+    )]
+    pointer: Option<Vec<String>>,
 
     /// Optional replacement commit message.
     #[arg(short = 'm', long)]
@@ -134,7 +136,7 @@ struct PointerMoveArgs {
     name: String,
 
     /// Offset to move the pointer by.
-    #[arg(value_name = "OFFSET")]
+    #[arg(value_name = "OFFSET", allow_hyphen_values = true)]
     offset: String,
 }
 
@@ -232,10 +234,10 @@ fn commit_date(commit: &str) -> Result<String, String> {
     git_output(["show", "-s", "--format=%cI", commit])
 }
 
-fn verify_commit(commit: &str) {
-    if let Err(error) = git_output(["rev-parse", "--verify", &format!("{commit}^{{commit}}")]) {
-        die(format!("invalid commit '{commit}': {error}"));
-    }
+/// Verifies that `commit` names a commit and returns its full hash.
+fn verify_commit(commit: &str) -> String {
+    git_output(["rev-parse", "--verify", &format!("{commit}^{{commit}}")])
+        .unwrap_or_else(|error| die(format!("invalid commit '{commit}': {error}")))
 }
 
 // ============================================================================
@@ -475,10 +477,7 @@ fn parse_datetime(value: &str) -> Result<DateTime, String> {
             .map(|(i, _)| i)
             .last()
             .ok_or_else(|| {
-                format!(
-                    "datetime must contain a timezone \
-                         (for example 2026-01-01T12:00:00Z)"
-                )
+                "datetime must contain a timezone (for example 2026-01-01T12:00:00Z)".to_string()
             })?;
 
         let main = &value[..position];
@@ -753,45 +752,23 @@ fn create_commit(datetime: &str, message: &str) {
     }
 }
 
+fn resolve_pointer_offset(pointer: &[String]) -> String {
+    let (name, offset) = (&pointer[0], &pointer[1]);
+
+    let base = resolve_pointer(name)
+        .unwrap_or_else(|e| die(format!("cannot resolve pointer '{name}': {e}")));
+
+    let offset = parse_offset(offset).unwrap_or_else(|e| die(e));
+
+    add_offset(&base, offset).unwrap_or_else(|e| die(e))
+}
+
 fn command_new(args: NewArgs) {
-    let (datetime, offset) = match (&args.datetime, &args.pointer, &args.offset) {
-        (Some(datetime), None, None) => (datetime.clone(), None),
-
-        (None, Some(pointer), Some(offset)) => {
-            let base = resolve_pointer(pointer)
-                .unwrap_or_else(|e| die(format!("cannot resolve pointer '{pointer}': {e}")));
-
-            let offset = parse_offset(offset).unwrap_or_else(|e| die(e));
-
-            let datetime = add_offset(&base, offset).unwrap_or_else(|e| die(e));
-
-            (datetime, Some(offset))
-        }
-
-        (None, Some(_), None) => {
-            die("--pointer requires an offset \
-                     (example: --pointer start +2d)");
-        }
-
-        (None, None, Some(_)) => {
-            die("an offset requires --pointer");
-        }
-
-        (Some(_), Some(_), _) => {
-            die("cannot use DATETIME together with --pointer");
-        }
-
-        (Some(_), None, Some(_)) => {
-            die("cannot use OFFSET without --pointer");
-        }
-
-        (None, None, None) => {
-            die("provide DATETIME or \
-                     --pointer POINTER OFFSET");
-        }
+    let datetime = match (&args.datetime, &args.pointer) {
+        (Some(datetime), None) => datetime.clone(),
+        (None, Some(pointer)) => resolve_pointer_offset(pointer),
+        _ => die("provide DATETIME or --pointer POINTER OFFSET"),
     };
-
-    let _ = offset;
 
     create_commit(&datetime, &args.message);
 }
@@ -819,7 +796,8 @@ fn shell_quote(value: &str) -> String {
 
 fn amend_commit(commit: &str, datetime: &str, message: Option<&str>) {
     ensure_git_repo();
-    verify_commit(commit);
+    let commit = verify_commit(commit);
+    let commit = commit.as_str();
 
     parse_datetime(datetime).unwrap_or_else(|e| die(format!("invalid datetime: {e}")));
 
@@ -891,40 +869,10 @@ fn command_amend(args: AmendArgs) {
     ensure_git_repo();
     verify_commit(&args.commit);
 
-    let datetime = match (&args.datetime, &args.pointer, &args.offset) {
-        (Some(datetime), None, None) => datetime.clone(),
-
-        (None, Some(pointer), Some(offset)) => {
-            let base = resolve_pointer(pointer)
-                .unwrap_or_else(|e| die(format!("cannot resolve pointer '{pointer}': {e}")));
-
-            let offset = parse_offset(offset).unwrap_or_else(|e| die(e));
-
-            add_offset(&base, offset).unwrap_or_else(|e| die(e))
-        }
-
-        (None, Some(_), None) => {
-            die("--pointer requires an offset \
-                 (example: --pointer start +2m)");
-        }
-
-        (None, None, Some(_)) => {
-            die("an offset requires --pointer");
-        }
-
-        (Some(_), Some(_), _) => {
-            die("cannot use DATETIME together with \
-                 --pointer");
-        }
-
-        (Some(_), None, Some(_)) => {
-            die("cannot use OFFSET without --pointer");
-        }
-
-        (None, None, None) => {
-            die("provide DATETIME or \
-                 --pointer POINTER OFFSET");
-        }
+    let datetime = match (&args.datetime, &args.pointer) {
+        (Some(datetime), None) => datetime.clone(),
+        (None, Some(pointer)) => resolve_pointer_offset(pointer),
+        _ => die("provide DATETIME or --pointer POINTER OFFSET"),
     };
 
     amend_commit(&args.commit, &datetime, args.message.as_deref());
