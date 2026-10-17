@@ -794,3 +794,7 @@ timegit pointer show <name>
 # In one sentence
 
 **`timegit` lets Git users create and rewrite commits at arbitrary past or future times without having to manually deal with Git's timestamp environment variables and date arithmetic.**
+
+git --no-pager log --oneline
+timegit amend <hash> "2025-07-31T12:00:00Z"
+git push --force origin main
